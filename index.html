@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>日程表</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/encoding-japanese/2.0.0/encoding.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="card">
+        <h1>日程表</h1>
+        <div id="statusIndicator">保存しました</div>
+
+        <div class="file-controls">
+            <div class="project-name-group">
+                <span>計画名：</span>
+                <input type="text" id="projectNameInput" value="標準の計画" />
+            </div>
+
+            <div style="flex-grow:1"></div>
+            <button id="todoBtn" class="btn-secondary" type="button">ToDoリスト</button>
+            <button id="downloadBtn" class="btn-secondary" type="button">💾 保存</button>
+            <button id="uploadBtn" class="btn-secondary" type="button">📂 開く</button>
+            <input type="file" id="fileInput" accept=".json" />
+        </div>
+
+        <div class="top-bar">
+            <div class="top-left">
+                <button id="undoBtn" class="btn-secondary" type="button" disabled>↩ 元に戻す</button>
+                <button id="redoBtn" class="btn-secondary" type="button" disabled>↪ やり直し</button>
+                <span class="sep">|</span>
+                <button id="deleteSelectedBtn" class="btn-secondary" type="button" style="color: #ef4444; border-color: #fca5a5; margin-right: 8px; display: none;">🗑️ 削除</button>
+                <label class="toggle-hidden-label">
+                    <input type="checkbox" id="showHiddenCheck"> 非表示行を表示
+                </label>
+            </div>
+            <div class="top-right">
+                <span id="rangeLabel"></span>
+                <button id="settingsButton" class="settings-button" type="button" aria-label="表示設定">≡</button>
+            </div>
+        </div>
+
+        <div id="gantt">
+            <div class="gantt-scroll-container">
+                <div class="gantt-inner">
+                    <div class="gantt-left">
+                        <div class="left-header sticky-target">
+                            <div id="rowSelectHeader" style="cursor: pointer; text-align: center; font-size: 14px; line-height: 26px;">🔲</div>
+                            <div id="lh1" contenteditable="true">項目1</div>
+                            <div id="lh2" contenteditable="true">項目2</div>
+                            <div id="lh3" contenteditable="true">時間</div>
+                        </div>
+                        <div id="leftRows" class="left-rows"></div>
+                        <div class="left-footer-placeholder">合計</div>
+                    </div>
+                    <div class="gantt-right" id="ganttRight">
+                        <div class="header-row sticky-target" id="headerRow"></div>
+                        <div class="rows" id="rowsContainer"></div>
+                        <div id="totalRow" class="total-row"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="free-memo-area">
+            <div class="free-memo-label">メモ・備考</div>
+            <div id="freeMemo" contenteditable="true"></div>
+        </div>
+    </div>
+
+    <div id="settingsPanel" class="settings-panel settings-hidden">
+        <div class="settings-content">
+            <h2>設定</h2>
+            <label>開始日 <input id="settingsStartDate" type="date" /></label>
+            <label>終了日 <input id="settingsEndDate" type="date" /></label>
+            <label>会社休日 (YYYY-MM-DD)<textarea id="settingsHolidays" placeholder="2025-01-01, 2025-12-31"></textarea></label>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 16px 0;">
+            <button id="clearAllBtn" class="btn-secondary" type="button" style="width: 100%; color: #ef4444; border-color: #fca5a5;">✨ 新規開始 (クリア)</button>
+            <div class="settings-buttons">
+                <button id="settingsCancel" class="btn-secondary" type="button">キャンセル</button>
+                <button id="settingsSave" class="btn-primary" type="button">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="todoPanel" class="settings-panel settings-hidden">
+        <div class="settings-content todo-window">
+            <div class="todo-header">
+                <h2>ToDoリスト</h2>
+                <button id="todoCloseBtn" class="close-btn" type="button">×</button>
+            </div>
+            <div class="todo-nav">
+                <button id="todoPrevDay" class="chip-btn" type="button">◀️</button>
+                <span id="todoDateDisplay" class="todo-date-display"></span>
+                <button id="todoNextDay" class="chip-btn" type="button">▶️</button>
+                <button id="todoTodayBtn" class="chip-btn" type="button" style="margin-left: 8px;">今日</button>
+            </div>
+            
+            <div class="todo-body">
+                <table class="todo-table">
+                    <colgroup>
+                        <col style="width: 25%;">
+                        <col style="width: 45%;">
+                        <col style="width: 15%;">
+                        <col style="width: 15%;">
+                    </colgroup>
+                    <thead id="todoThead"></thead>
+                    <tbody id="todoTableBody"></tbody>
+                </table>
+                <div id="todoEmptyMsg" style="text-align:center; padding: 20px; color:#999; display:none;">予定はありません</div>
+            </div>
+
+            <div class="todo-footer">
+                <label style="font-size:11px; color:#666; display:block; margin-bottom:4px;">
+                    出力項目 (カンマ区切り, 上限50):
+                </label>
+                <textarea id="todoColumnsInput" rows="2" style="width:100%; font-size:12px; border:1px solid #ddd; border-radius:4px; padding:4px;"></textarea>
+                <div style="margin-top:8px; display:flex; justify-content:space-between; align-items:center;">
+                    <button id="todoAddRowBtn" class="btn-primary" type="button" style="font-size:12px;">＋ 行を追加</button>
+
+                    <div style="display:flex; gap:8px;">
+                        <button id="todoCsvBtn" class="btn-secondary" type="button">CSV出力</button>
+                        <button id="outlookBtn" class="btn-secondary" type="button">Outlook対応</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="taskMemoPanel" class="task-memo-panel memo-hidden" aria-hidden="true">
+        <div class="task-memo-header" id="taskMemoHeader">
+            <span id="taskMemoTitle">メモ</span>
+            <button id="taskMemoClose" class="close-btn" type="button" aria-label="閉じる">×</button>
+        </div>
+        <textarea id="taskMemoTextarea" maxlength="3000" placeholder="この項目のメモを入力 (最大3000文字)"></textarea>
+        <div class="task-memo-footer">
+            <span id="taskMemoCount">0 / 3000</span>
+        </div>
+    </div>
+
+    <div id="contextMenu" class="context-menu">
+        <div class="menu-item" id="cmComplete">✅ 完了/未完了</div>
+        <div class="menu-item" id="cmHide">👁️ 非表示</div>
+        <div class="menu-item" id="cmUnhide" style="display:none;">👁️ 表示</div>
+        <div class="menu-separator"></div>
+    </div>
+
+    <div id="segmentContextMenu" class="context-menu">
+        <div class="menu-item" id="ctxSegProgress">📊 進捗描画</div>
+        <div class="menu-separator"></div>
+        <div class="menu-item delete" id="ctxSegDelete">🗑️ 削除</div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
