@@ -778,6 +778,7 @@ function buildHeader() {
         if (d.isWeekend) c.classList.add("weekend");
         if (d.isHoliday) c.classList.add("holiday");
         if (d.isToday) c.classList.add("today");
+        if (d.isToday) c.classList.add("today-boundary");
         c.innerHTML = `<div class="header-day-num">${d.month}/${d.day}</div><div class="header-day-week">${WEEKDAYS[d.dow]}</div>`;
         headerRow.appendChild(c);
     });
@@ -793,6 +794,148 @@ function buildHeader() {
         c.dataset.iso = d.iso;
         totalRow.appendChild(c);
     });
+}
+
+function ensureProgressGuideOverlay() {
+    let overlay = rowsContainer.querySelector(".progress-guide-overlay");
+    if (overlay) return overlay;
+
+    overlay = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    overlay.classList.add("progress-guide-overlay");
+    overlay.setAttribute("aria-hidden", "true");
+    rowsContainer.appendChild(overlay);
+    return overlay;
+}
+
+function ensureTotalGuideOverlay() {
+    let overlay = totalRow.querySelector(".total-guide-overlay");
+    if (overlay) return overlay;
+
+    overlay = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    overlay.classList.add("total-guide-overlay");
+    overlay.setAttribute("aria-hidden", "true");
+    totalRow.appendChild(overlay);
+    return overlay;
+}
+
+function getVisibleTaskRows() {
+    return taskObjects.filter(task => task.rowEl && task.rowEl.offsetParent !== null);
+}
+
+function getGuideAnchorPoint(task, overlayRect) {
+    if (!task.mainSchedule) return null;
+
+    const progressEl = task.segLayerEl.querySelector('[data-guide-role="main-progress"]');
+    if (progressEl) {
+        const rect = progressEl.getBoundingClientRect();
+        return {
+            x: rect.right - overlayRect.left,
+            y: rect.top + (rect.height / 2) - overlayRect.top
+        };
+    }
+
+    const mainEl = task.segLayerEl.querySelector('[data-guide-role="main-base"]');
+    if (!mainEl) return null;
+
+    const rect = mainEl.getBoundingClientRect();
+    return {
+        x: rect.left - overlayRect.left,
+        y: rect.top + (rect.height / 2) - overlayRect.top
+    };
+}
+
+function appendGuideForTask(commands, task, overlayRect, boundaryX, previousPoint, isFirstTask = false) {
+    const rowRect = task.rowEl.getBoundingClientRect();
+    const rowTop = rowRect.top - overlayRect.top;
+    const rowBottom = rowRect.bottom - overlayRect.top;
+    const anchorPoint = getGuideAnchorPoint(task, overlayRect);
+
+    if (anchorPoint) {
+        commands.push(`L ${anchorPoint.x} ${anchorPoint.y}`);
+        return { x: anchorPoint.x, y: anchorPoint.y };
+    }
+
+    if (!isFirstTask && (previousPoint.x !== boundaryX || previousPoint.y !== rowTop)) {
+        commands.push(`L ${boundaryX} ${rowTop}`);
+    }
+
+    if (previousPoint.x !== boundaryX || previousPoint.y !== rowBottom) {
+        commands.push(`L ${boundaryX} ${rowBottom}`);
+    }
+
+    return { x: boundaryX, y: rowBottom };
+}
+
+function renderProgressGuide() {
+    const overlay = ensureProgressGuideOverlay();
+    const totalOverlay = ensureTotalGuideOverlay();
+    overlay.innerHTML = "";
+    totalOverlay.innerHTML = "";
+
+    if (!timelineDays.length) return;
+
+    const visibleTasks = getVisibleTaskRows();
+    if (visibleTasks.length === 0) return;
+
+    const todayHeader = headerRow.querySelector(".header-day.today-boundary");
+    if (!todayHeader) return;
+
+    const overlayWidth = Math.max(headerRow.scrollWidth, rowsContainer.scrollWidth, totalRow.scrollWidth);
+    const overlayHeight = rowsContainer.scrollHeight;
+    overlay.setAttribute("width", String(overlayWidth));
+    overlay.setAttribute("height", String(overlayHeight));
+    overlay.setAttribute("viewBox", `0 0 ${overlayWidth} ${overlayHeight}`);
+    totalOverlay.setAttribute("width", String(overlayWidth));
+    totalOverlay.setAttribute("height", String(totalRow.offsetHeight));
+    totalOverlay.setAttribute("viewBox", `0 0 ${overlayWidth} ${totalRow.offsetHeight}`);
+
+    const overlayRect = overlay.getBoundingClientRect();
+    const todayRect = todayHeader.getBoundingClientRect();
+    const startX = todayRect.left - overlayRect.left;
+    const startY = 0;
+
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.classList.add("progress-guide-path");
+    const commands = [`M ${startX} ${startY}`];
+    let lastGuidePoint = { x: startX, y: startY };
+
+    visibleTasks.forEach((task, index) => {
+        lastGuidePoint = appendGuideForTask(
+            commands,
+            task,
+            overlayRect,
+            startX,
+            lastGuidePoint,
+            index === 0
+        );
+    });
+
+    const lastTask = visibleTasks[visibleTasks.length - 1];
+    let finalBoundaryY = null;
+    let finalTotalBottomY = null;
+    if (lastTask) {
+        const lastRowRect = lastTask.rowEl.getBoundingClientRect();
+        finalBoundaryY = lastRowRect.bottom - overlayRect.top;
+        const totalRect = totalRow.getBoundingClientRect();
+        finalTotalBottomY = totalRect.bottom - overlayRect.top;
+    }
+
+    path.setAttribute("d", commands.join(" "));
+    overlay.appendChild(path);
+
+    if (finalBoundaryY != null) {
+        const connectorPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        connectorPath.classList.add("progress-guide-path");
+        connectorPath.setAttribute("d", `M ${lastGuidePoint.x} ${lastGuidePoint.y} L ${startX} ${finalBoundaryY}`);
+        overlay.appendChild(connectorPath);
+
+        if (finalTotalBottomY != null && finalTotalBottomY !== finalBoundaryY) {
+            const tailPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            tailPath.classList.add("progress-guide-path");
+            tailPath.setAttribute("d", `M ${startX} 0 L ${startX} ${totalRow.offsetHeight}`);
+            totalOverlay.appendChild(tailPath);
+        }
+    }
 }
 
 // ============================================
@@ -1075,6 +1218,7 @@ function renderAllSegments() {
     });
     calculateTotals();
     updateBottomRowBorders();
+    renderProgressGuide();
 }
 
 function drawScheduleDivider(task) {
@@ -1107,6 +1251,7 @@ function drawMainSchedule(task) {
 
     const line = document.createElement("div");
     line.className = "segment main-segment";
+    line.dataset.guideRole = "main-base";
     line.style.left = left + "px";
     line.style.width = width + "px";
     line.style.top = MAIN_LINE_Y + "px";
@@ -1150,6 +1295,7 @@ function drawMainSchedule(task) {
                 if (doneWidth > 0) {
                     const doneLine = document.createElement("div");
                     doneLine.className = "segment main-segment done";
+                    doneLine.dataset.guideRole = "main-progress";
                     doneLine.style.left = progressLeft + "px";
                     doneLine.style.width = doneWidth + "px";
                     doneLine.style.top = MAIN_LINE_Y + "px";

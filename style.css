@@ -231,6 +231,35 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .gantt-right {
     flex: 1; 
     display: flex; flex-direction: column;
+    position: relative;
+}
+
+.progress-guide-overlay {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+    z-index: 2;
+    overflow: hidden;
+}
+
+.total-guide-overlay {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+    z-index: 2;
+    overflow: hidden;
+}
+
+.progress-guide-path {
+    fill: none;
+    stroke: #ef4444;
+    stroke-width: 1.5;
+    stroke-dasharray: 4 4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
 }
 
 .header-row { display: grid; align-items: stretch; font-size: 10px; background: #fff; }
@@ -240,6 +269,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
     text-align: center;
     display: flex; flex-direction: column; justify-content: center;
     padding: 2px 0 3px; background: #fff; height: 28px;
+    position: relative;
 }
 .header-row { border-top: 1px solid var(--border); }
 .header-day-num { font-size: 11px; font-weight: 600; }
@@ -247,8 +277,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .header-day.weekend { background: var(--weekend-bg); }
 .header-day.holiday { background: var(--holiday-bg); }
 .header-day.today { background: var(--today-bg) !important; }
+.header-day.today-boundary::before {
+    content: "";
+    position: absolute;
+    left: -1px;
+    top: -1px;
+    bottom: -1px;
+    border-left: 2px dashed #ef4444;
+    pointer-events: none;
+    z-index: 2;
+}
 
-.rows { margin-top: 0; }
+.rows { margin-top: 0; position: relative; }
 .task-row {
     position: relative; display: grid; min-height: 129px; height: auto;
     font-size: 12px; align-items: stretch;
