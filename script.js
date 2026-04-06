@@ -155,7 +155,8 @@ let appData = {
     settings: {
         startDate: dateToISO(defaultStart),
         endDate: dateToISO(defaultEnd),
-        holidays: []
+        holidays: [],
+        showMainLine: true
     },
     headers: ["項目1", "項目2", "時間"], 
     todoColumns: DEFAULT_TODO_COLUMNS,
@@ -177,6 +178,7 @@ let suppressNextClickAfterMenuDismiss = false;
 
 let currentTodoDate = new Date();
 let todoSelectionState = false; 
+let pendingGuideRefreshFrame = null;
 
 let dragState = {
     isDragging: false,
@@ -201,6 +203,7 @@ const rangeLabel = document.getElementById("rangeLabel");
 const ganttRight = document.getElementById("ganttRight");
 const freeMemo = document.getElementById("freeMemo");
 const showHiddenCheck = document.getElementById("showHiddenCheck");
+const showMainLineCheck = document.getElementById("showMainLineCheck");
 const projectNameInput = document.getElementById("projectNameInput");
 
 const contextMenu = document.getElementById("contextMenu");
@@ -387,6 +390,7 @@ function getSubScheduleLaneFromY(y) {
 function normalizeMainSchedule(mainSchedule) {
     if (!mainSchedule || !mainSchedule.startDate || !mainSchedule.endDate) return null;
     return {
+        id: mainSchedule.id || ("main_" + Date.now() + "_" + Math.random().toString(36).slice(2)),
         startDate: mainSchedule.startDate,
         endDate: mainSchedule.endDate,
         label: mainSchedule.label || "メイン計画",
@@ -401,6 +405,49 @@ function normalizeMainSchedule(mainSchedule) {
             }))
             : []
     };
+}
+
+function normalizeMainSchedules(taskData) {
+    if (Array.isArray(taskData.mainSchedules)) {
+        return taskData.mainSchedules
+            .map(normalizeMainSchedule)
+            .filter(Boolean)
+            .sort((a, b) => a.startDate.localeCompare(b.startDate));
+    }
+    const legacyMain = normalizeMainSchedule(taskData.mainSchedule);
+    return legacyMain ? [legacyMain] : [];
+}
+
+function serializeMainSchedule(main) {
+    return {
+        id: main.id,
+        startDate: main.startDate,
+        endDate: main.endDate,
+        label: main.label || "",
+        startLabel: main.startLabel || "",
+        endLabel: main.endLabel || "",
+        progressEndDate: main.progressEndDate || null,
+        milestones: (main.milestones || []).map(ms => ({
+            id: ms.id,
+            date: ms.date,
+            label: ms.label || ""
+        }))
+    };
+}
+
+function findMainScheduleById(task, mainId) {
+    return (task.mainSchedules || []).find(main => main.id === mainId) || null;
+}
+
+function findMainScheduleByDate(task, iso) {
+    return (task.mainSchedules || []).find(main => iso >= main.startDate && iso <= main.endDate) || null;
+}
+
+function hasOverlappingMainSchedule(task, startIso, endIso, excludeId = null) {
+    return (task.mainSchedules || []).some(main => {
+        if (excludeId && main.id === excludeId) return false;
+        return !(endIso < main.startDate || startIso > main.endDate);
+    });
 }
 
 function getTaskTitle(task) {
@@ -594,19 +641,8 @@ function syncDataModel() {
             label1: t.leftRowEl.children[1].firstElementChild.textContent,
             label2: t.leftRowEl.children[2].firstElementChild.textContent,
             label3: t.leftRowEl.children[3].firstElementChild.textContent,
-            mainSchedule: t.mainSchedule ? {
-                startDate: t.mainSchedule.startDate,
-                endDate: t.mainSchedule.endDate,
-                label: t.mainSchedule.label || "",
-                startLabel: t.mainSchedule.startLabel || "",
-                endLabel: t.mainSchedule.endLabel || "",
-                progressEndDate: t.mainSchedule.progressEndDate || null,
-                milestones: (t.mainSchedule.milestones || []).map(ms => ({
-                    id: ms.id,
-                    date: ms.date,
-                    label: ms.label || ""
-                }))
-            } : null,
+            mainSchedule: (t.mainSchedules && t.mainSchedules.length > 0) ? serializeMainSchedule(t.mainSchedules[0]) : null,
+            mainSchedules: (t.mainSchedules || []).map(serializeMainSchedule),
             segments: t.segments.map(seg => ({
                 id: seg.id,
                 startDate: seg.startDate,
@@ -672,6 +708,7 @@ async function initializeApp() {
         document.getElementById("lh2").textContent = appData.headers[1];
         document.getElementById("lh3").textContent = appData.headers[2];
         document.getElementById("todoColumnsInput").value = appData.todoColumns;
+        showMainLineCheck.checked = appData.settings.showMainLine !== false;
         leftColumnWidths = appData.columnWidths.slice();
         applyLeftColumnWidths();
         buildTimeline();
@@ -690,6 +727,9 @@ function restoreFromData(data) {
         appData.settings.startDate = dateToISO(defaultStart);
         appData.settings.endDate = dateToISO(defaultEnd);
     }
+    if (typeof appData.settings.showMainLine !== "boolean") {
+        appData.settings.showMainLine = true;
+    }
     if (!appData.headers) appData.headers = ["項目1", "項目2", "時間"];
     if (!appData.columnWidths) appData.columnWidths = [30, 120, 90, 40];
     
@@ -706,6 +746,7 @@ function restoreFromData(data) {
     document.getElementById("lh3").textContent = appData.headers[2];
 
     document.getElementById("todoColumnsInput").value = appData.todoColumns;
+    showMainLineCheck.checked = appData.settings.showMainLine !== false;
 
     leftRowsContainer.innerHTML = "";
     rowsContainer.innerHTML = "";
@@ -718,7 +759,7 @@ function restoreFromData(data) {
 
     if (appData.tasks && appData.tasks.length > 0) {
         appData.tasks.forEach(tData => {
-            tData.mainSchedule = normalizeMainSchedule(tData.mainSchedule);
+            tData.mainSchedules = normalizeMainSchedules(tData);
             addTaskRow(tData);
         });
     } else {
@@ -770,6 +811,7 @@ function updateRangeLabel() {
 
 function buildHeader() {
     const total = timelineDays.length;
+    const showMainLine = appData.settings.showMainLine !== false;
     headerRow.innerHTML = "";
     headerRow.style.gridTemplateColumns = `repeat(${total}, ${CELL_WIDTH}px)`;
     timelineDays.forEach((d) => {
@@ -778,7 +820,7 @@ function buildHeader() {
         if (d.isWeekend) c.classList.add("weekend");
         if (d.isHoliday) c.classList.add("holiday");
         if (d.isToday) c.classList.add("today");
-        if (d.isToday) c.classList.add("today-boundary");
+        if (d.isToday && showMainLine) c.classList.add("today-boundary");
         c.innerHTML = `<div class="header-day-num">${d.month}/${d.day}</div><div class="header-day-week">${WEEKDAYS[d.dow]}</div>`;
         headerRow.appendChild(c);
     });
@@ -823,18 +865,31 @@ function getVisibleTaskRows() {
 }
 
 function getGuideAnchorPoint(task, overlayRect) {
-    if (!task.mainSchedule) return null;
+    const mainSchedules = [...(task.mainSchedules || [])]
+        .sort((a, b) => a.startDate.localeCompare(b.startDate));
 
-    const progressEl = task.segLayerEl.querySelector('[data-guide-role="main-progress"]');
-    if (progressEl) {
-        const rect = progressEl.getBoundingClientRect();
-        return {
-            x: rect.right - overlayRect.left,
-            y: rect.top + (rect.height / 2) - overlayRect.top
-        };
+    const targetMain = mainSchedules.find(main => {
+        if (!main.progressEndDate) return true;
+        return main.progressEndDate < main.endDate;
+    });
+    if (!targetMain) return null;
+
+    if (targetMain.startDate > todayISO) {
+        return null;
     }
 
-    const mainEl = task.segLayerEl.querySelector('[data-guide-role="main-base"]');
+    if (targetMain.progressEndDate) {
+        const progressEl = task.segLayerEl.querySelector(`[data-guide-role="main-progress"][data-main-id="${targetMain.id}"]`);
+        if (progressEl) {
+            const rect = progressEl.getBoundingClientRect();
+            return {
+                x: rect.right - overlayRect.left,
+                y: rect.top + (rect.height / 2) - overlayRect.top
+            };
+        }
+    }
+
+    const mainEl = task.segLayerEl.querySelector(`[data-guide-role="main-base"][data-main-id="${targetMain.id}"]`);
     if (!mainEl) return null;
 
     const rect = mainEl.getBoundingClientRect();
@@ -872,6 +927,7 @@ function renderProgressGuide() {
     overlay.innerHTML = "";
     totalOverlay.innerHTML = "";
 
+    if (appData.settings.showMainLine === false) return;
     if (!timelineDays.length) return;
 
     const visibleTasks = getVisibleTaskRows();
@@ -936,6 +992,16 @@ function renderProgressGuide() {
             totalOverlay.appendChild(tailPath);
         }
     }
+}
+
+function scheduleProgressGuideRefresh() {
+    if (pendingGuideRefreshFrame !== null) {
+        cancelAnimationFrame(pendingGuideRefreshFrame);
+    }
+    pendingGuideRefreshFrame = requestAnimationFrame(() => {
+        pendingGuideRefreshFrame = null;
+        renderProgressGuide();
+    });
 }
 
 // ============================================
@@ -1087,7 +1153,7 @@ function addTaskRow(initialData = null) {
 
     const task = {
         id, rowEl: row, leftRowEl: leftRow, cellRowEl: cellRow, segLayerEl: segLayer,
-        mainSchedule: initialData ? normalizeMainSchedule(initialData.mainSchedule) : null,
+        mainSchedules: initialData ? normalizeMainSchedules(initialData) : [],
         segments: initialData ? initialData.segments.map(seg => ({
             ...seg,
             isSelected: false,
@@ -1191,9 +1257,9 @@ function renderAllSegments() {
         task.rowEl.style.height = finalHeight + "px";
         task.leftRowEl.style.height = finalHeight + "px";
 
-        if (task.mainSchedule) {
-            drawMainSchedule(task);
-        }
+        (task.mainSchedules || []).forEach((main, mainIndex) => {
+            drawMainSchedule(task, main, mainIndex);
+        });
 
         task.segments.forEach((seg) => {
             const lane = seg._lane || 0;
@@ -1228,8 +1294,7 @@ function drawScheduleDivider(task) {
     task.segLayerEl.appendChild(divider);
 }
 
-function drawMainSchedule(task) {
-    const main = task.mainSchedule;
+function drawMainSchedule(task, main, mainIndex = 0) {
     if (!main) return;
 
     const rangeStart = timelineDays[0]?.date;
@@ -1252,6 +1317,7 @@ function drawMainSchedule(task) {
     const line = document.createElement("div");
     line.className = "segment main-segment";
     line.dataset.guideRole = "main-base";
+    line.dataset.mainId = main.id;
     line.style.left = left + "px";
     line.style.width = width + "px";
     line.style.top = MAIN_LINE_Y + "px";
@@ -1277,7 +1343,7 @@ function drawMainSchedule(task) {
     line.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        showSegmentContextMenu(e, task, { id: "__main__", scheduleScope: "main" });
+        showSegmentContextMenu(e, task, { id: main.id, scheduleScope: "main" });
     });
     task.segLayerEl.appendChild(line);
 
@@ -1296,6 +1362,7 @@ function drawMainSchedule(task) {
                     const doneLine = document.createElement("div");
                     doneLine.className = "segment main-segment done";
                     doneLine.dataset.guideRole = "main-progress";
+                    doneLine.dataset.mainId = main.id;
                     doneLine.style.left = progressLeft + "px";
                     doneLine.style.width = doneWidth + "px";
                     doneLine.style.top = MAIN_LINE_Y + "px";
@@ -1313,19 +1380,19 @@ function drawMainSchedule(task) {
         pt.style.left = centerX(dateToIndex(main.startDate)) + "px";
         pt.style.top = MAIN_LINE_Y + "px";
         pt.style.cursor = "grab";
-        pt.addEventListener("mousedown", (e) => initDrag(e, task, main, "move", line, "main"));
+        pt.addEventListener("mousedown", (e) => initDrag(e, task, main, "move", pt, "main"));
         pt.addEventListener("dblclick", (e) => {
             e.preventDefault();
             e.stopPropagation();
-            editMainEndpointLabel(task, "start");
+            editMainEndpointLabel(task, main, "start");
         });
         pt.addEventListener("contextmenu", (e) => {
             e.preventDefault();
             e.stopPropagation();
-            showSegmentContextMenu(e, task, { id: "__main__", scheduleScope: "main" });
+            showSegmentContextMenu(e, task, { id: main.id, scheduleScope: "main" });
         });
         task.segLayerEl.appendChild(pt);
-        drawMainEndpointLabel(task, "start", centerX(dateToIndex(main.startDate)), main.startLabel || "");
+        drawMainEndpointLabel(task, main, "start", centerX(dateToIndex(main.startDate)), main.startLabel || "");
     }
 
     if (endDate >= rangeStart && endDate <= rangeEnd) {
@@ -1335,26 +1402,26 @@ function drawMainSchedule(task) {
         pt.style.left = centerX(dateToIndex(main.endDate)) + "px";
         pt.style.top = MAIN_LINE_Y + "px";
         pt.style.cursor = "grab";
-        pt.addEventListener("mousedown", (e) => initDrag(e, task, main, "move", line, "main"));
+        pt.addEventListener("mousedown", (e) => initDrag(e, task, main, "move", pt, "main"));
         pt.addEventListener("dblclick", (e) => {
             e.preventDefault();
             e.stopPropagation();
-            editMainEndpointLabel(task, "end");
+            editMainEndpointLabel(task, main, "end");
         });
         pt.addEventListener("contextmenu", (e) => {
             e.preventDefault();
             e.stopPropagation();
-            showSegmentContextMenu(e, task, { id: "__main__", scheduleScope: "main" });
+            showSegmentContextMenu(e, task, { id: main.id, scheduleScope: "main" });
         });
         task.segLayerEl.appendChild(pt);
-        drawMainEndpointLabel(task, "end", centerX(dateToIndex(main.endDate)), main.endLabel || "");
+        drawMainEndpointLabel(task, main, "end", centerX(dateToIndex(main.endDate)), main.endLabel || "");
     }
 
     const milestones = [...(main.milestones || [])].sort((a, b) => a.date.localeCompare(b.date));
-    milestones.forEach((milestone, index) => drawMainMilestone(task, milestone, index));
+    milestones.forEach((milestone, index) => drawMainMilestone(task, main, milestone, index + (mainIndex * 100)));
 }
 
-function drawMainMilestone(task, milestone, index) {
+function drawMainMilestone(task, main, milestone, index) {
     const idx = dateToIndex(milestone.date);
     if (idx === -1) return;
     const x = centerX(idx);
@@ -1362,22 +1429,22 @@ function drawMainMilestone(task, milestone, index) {
     const labelTop = isAbove ? (MAIN_LINE_Y - 23) : (MAIN_LINE_Y + 9);
 
     const pt = document.createElement("div");
-    const isDone = task.mainSchedule?.progressEndDate && isoToDate(task.mainSchedule.progressEndDate).getTime() >= isoToDate(milestone.date).getTime();
+    const isDone = main?.progressEndDate && isoToDate(main.progressEndDate).getTime() >= isoToDate(milestone.date).getTime();
     pt.className = "point milestone-point" + (isDone ? " done" : "");
     pt.style.left = x + "px";
     pt.style.top = MAIN_LINE_Y + "px";
     pt.style.cursor = "grab";
-    pt.addEventListener("mousedown", (e) => initDrag(e, task, milestone, "move", pt, "milestone"));
+    pt.addEventListener("mousedown", (e) => initDrag(e, task, { ...milestone, mainId: main.id }, "move", pt, "milestone"));
     pt.addEventListener("dblclick", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        editMilestone(task, milestone);
+        editMilestone(task, main, milestone);
     });
     pt.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
         if (confirm("このマイルストーンを削除しますか？")) {
-            task.mainSchedule.milestones = (task.mainSchedule.milestones || []).filter(ms => ms.id !== milestone.id);
+            main.milestones = (main.milestones || []).filter(ms => ms.id !== milestone.id);
             renderAllSegments();
             triggerSave();
         }
@@ -1393,7 +1460,7 @@ function drawMainMilestone(task, milestone, index) {
     label.addEventListener("dblclick", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        editMilestone(task, milestone);
+        editMilestone(task, main, milestone);
     });
     label.addEventListener("click", (e) => {
         if (isCtrlSelectionMode || e.ctrlKey) {
@@ -1403,13 +1470,13 @@ function drawMainMilestone(task, milestone, index) {
         }
         e.preventDefault();
         e.stopPropagation();
-        editMilestone(task, milestone);
+        editMilestone(task, main, milestone);
     });
     label.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
         if (confirm("このマイルストーンを削除しますか？")) {
-            task.mainSchedule.milestones = (task.mainSchedule.milestones || []).filter(ms => ms.id !== milestone.id);
+            main.milestones = (main.milestones || []).filter(ms => ms.id !== milestone.id);
             renderAllSegments();
             triggerSave();
         }
@@ -1417,7 +1484,7 @@ function drawMainMilestone(task, milestone, index) {
     task.segLayerEl.appendChild(label);
 }
 
-function editMilestone(task, milestone) {
+function editMilestone(task, main, milestone) {
     const nextLabel = prompt("マイルストーン名:", milestone.label || "マイルストーン");
     if (nextLabel === null) return;
     milestone.label = nextLabel.trim() || "マイルストーン";
@@ -1438,7 +1505,7 @@ function handleSubLabelMouseDown(e, task, seg, dragEl) {
     initDrag(e, task, seg, "move", dragEl);
 }
 
-function drawMainEndpointLabel(task, side, x, text) {
+function drawMainEndpointLabel(task, main, side, x, text) {
     if (!text) return;
     const label = document.createElement("div");
     label.className = "segment-label main-endpoint-label";
@@ -1449,7 +1516,7 @@ function drawMainEndpointLabel(task, side, x, text) {
     label.addEventListener("dblclick", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        editMainEndpointLabel(task, side);
+        editMainEndpointLabel(task, main, side);
     });
     label.addEventListener("click", (e) => {
         if (isCtrlSelectionMode || e.ctrlKey) {
@@ -1459,13 +1526,12 @@ function drawMainEndpointLabel(task, side, x, text) {
         }
         e.preventDefault();
         e.stopPropagation();
-        editMainEndpointLabel(task, side);
+        editMainEndpointLabel(task, main, side);
     });
     task.segLayerEl.appendChild(label);
 }
 
-function editMainEndpointLabel(task, side) {
-    const main = task.mainSchedule;
+function editMainEndpointLabel(task, main, side) {
     if (!main) return;
     const key = side === "start" ? "startLabel" : "endLabel";
     const promptLabel = side === "start" ? "開始コメント" : "終了コメント";
@@ -1766,7 +1832,7 @@ function initDrag(e, task, seg, type, el, scope = "sub") {
     }
 
     dragState = {
-        isDragging: true, type: dragType, taskId: task.id, segId: seg.id || null, milestoneId: scope === "milestone" ? (seg.id || null) : null, selectedSegRefs, scope, startX: e.clientX,
+        isDragging: true, type: dragType, taskId: task.id, segId: seg.id || null, milestoneId: scope === "milestone" ? (seg.id || null) : null, mainId: scope === "milestone" ? (seg.mainId || null) : (scope === "main" ? (seg.id || null) : null), selectedSegRefs, scope, startX: e.clientX,
         originalLeft: parseFloat(el.style.left), originalWidth: parseFloat(el.style.width),
         originalStartDate: seg.startDate || seg.date, originalEndDate: seg.endDate || seg.date, el: el
     };
@@ -1818,16 +1884,16 @@ function handleGlobalMouseUp(e) {
         const task = taskObjects.find(t => t.id === dragState.taskId);
         const seg = !task ? null : (
             dragState.scope === "main"
-                ? task.mainSchedule
+                ? findMainScheduleById(task, dragState.segId)
                 : dragState.scope === "milestone"
-                    ? (task.mainSchedule?.milestones || []).find(ms => ms.id === dragState.milestoneId)
+                    ? (findMainScheduleById(task, dragState.mainId)?.milestones || []).find(ms => ms.id === dragState.milestoneId)
                     : task.segments.find(s => s.id === dragState.segId)
         );
 
         if (task && seg && dayDelta !== 0) {
             if (dragState.scope === "milestone" && dragState.type === "move") {
                 const shiftedDate = shiftDateStr(dragState.originalStartDate, dayDelta);
-                const main = task.mainSchedule;
+                const main = findMainScheduleById(task, dragState.mainId);
                 if (main) {
                     const clampedDate = shiftedDate < main.startDate
                         ? main.startDate
@@ -1855,35 +1921,50 @@ function handleGlobalMouseUp(e) {
                     }
                 });
             } else if (dragState.type === "move") {
-                seg.startDate = shiftDateStr(dragState.originalStartDate, dayDelta);
-                seg.endDate = shiftDateStr(dragState.originalEndDate, dayDelta);
+                const nextStartDate = shiftDateStr(dragState.originalStartDate, dayDelta);
+                const nextEndDate = shiftDateStr(dragState.originalEndDate, dayDelta);
 
-                if (dragState.scope === "main" && Array.isArray(seg.milestones)) {
-                    seg.milestones = seg.milestones.map(ms => ({
-                        ...ms,
-                        date: shiftDateStr(ms.date, dayDelta)
-                    }));
-                }
+                if (dragState.scope === "main" && hasOverlappingMainSchedule(task, nextStartDate, nextEndDate, seg.id)) {
+                    alert("メイン計画は重複して設定できません。別の日付範囲を指定してください。");
+                } else {
+                    seg.startDate = nextStartDate;
+                    seg.endDate = nextEndDate;
 
-                if (dragState.scope !== "main" && seg.dailyValues) {
-                    const newVals = {};
-                    Object.keys(seg.dailyValues).forEach(iso => newVals[shiftDateStr(iso, dayDelta)] = seg.dailyValues[iso]);
-                    seg.dailyValues = newVals;
-                }
-                if (dragState.scope !== "main" && seg.dailyResults) {
-                    const newRes = {};
-                    Object.keys(seg.dailyResults).forEach(iso => newRes[shiftDateStr(iso, dayDelta)] = seg.dailyResults[iso]);
-                    seg.dailyResults = newRes;
+                    if (dragState.scope === "main" && Array.isArray(seg.milestones)) {
+                        seg.milestones = seg.milestones.map(ms => ({
+                            ...ms,
+                            date: shiftDateStr(ms.date, dayDelta)
+                        }));
+                    }
+
+                    if (dragState.scope !== "main" && seg.dailyValues) {
+                        const newVals = {};
+                        Object.keys(seg.dailyValues).forEach(iso => newVals[shiftDateStr(iso, dayDelta)] = seg.dailyValues[iso]);
+                        seg.dailyValues = newVals;
+                    }
+                    if (dragState.scope !== "main" && seg.dailyResults) {
+                        const newRes = {};
+                        Object.keys(seg.dailyResults).forEach(iso => newRes[shiftDateStr(iso, dayDelta)] = seg.dailyResults[iso]);
+                        seg.dailyResults = newRes;
+                    }
                 }
 
             } else if (dragState.type === "resize-right") {
                 const newEnd = shiftDateStr(dragState.originalEndDate, dayDelta);
-                seg.endDate = newEnd; 
-                if(seg.endDate < seg.startDate) seg.endDate = seg.startDate;
+                const nextEnd = newEnd < seg.startDate ? seg.startDate : newEnd;
+                if (dragState.scope === "main" && hasOverlappingMainSchedule(task, seg.startDate, nextEnd, seg.id)) {
+                    alert("メイン計画は重複して設定できません。");
+                } else {
+                    seg.endDate = nextEnd;
+                }
             } else if (dragState.type === "resize-left") {
                 const newStart = shiftDateStr(dragState.originalStartDate, dayDelta);
-                seg.startDate = newStart;
-                if(seg.startDate > seg.endDate) seg.startDate = seg.endDate;
+                const nextStart = newStart > seg.endDate ? seg.endDate : newStart;
+                if (dragState.scope === "main" && hasOverlappingMainSchedule(task, nextStart, seg.endDate, seg.id)) {
+                    alert("メイン計画は重複して設定できません。");
+                } else {
+                    seg.startDate = nextStart;
+                }
             }
             triggerSave();
         }
@@ -1953,9 +2034,8 @@ function handleCellClick(task, index, y = SUB_SCHEDULE_TOP) {
     task.pendingMainStartDate = null;
 
     if (activeProgressSegmentId) {
-        const targetSeg = activeProgressSegmentId === "__main__"
-            ? task.mainSchedule
-            : task.segments.find(s => s.id === activeProgressSegmentId);
+        const targetSeg = findMainScheduleById(task, activeProgressSegmentId)
+            || task.segments.find(s => s.id === activeProgressSegmentId);
         if (targetSeg) {
             targetSeg.progressEndDate = clickedIso;
             activeProgressSegmentId = null; 
@@ -2156,8 +2236,9 @@ document.getElementById("ctxSegDelete").addEventListener("click", () => {
     if (contextMenuTargetTaskForSeg && contextMenuTargetSegId) {
         if (confirm("選択の計画を削除しますか？")) {
             if (segmentContextMenu.dataset.scope === "main") {
-                contextMenuTargetTaskForSeg.mainSchedule = null;
-                if (activeProgressSegmentId === "__main__") {
+                contextMenuTargetTaskForSeg.mainSchedules = (contextMenuTargetTaskForSeg.mainSchedules || [])
+                    .filter(main => main.id !== contextMenuTargetSegId);
+                if (activeProgressSegmentId === contextMenuTargetSegId) {
                     activeProgressSegmentId = null;
                     activeProgressTaskId = null;
                 }
@@ -2176,6 +2257,13 @@ document.getElementById("ctxSegDelete").addEventListener("click", () => {
 
 showHiddenCheck.addEventListener("change", (e) => {
     document.body.classList.toggle("show-hidden-mode", e.target.checked);
+});
+showMainLineCheck.addEventListener("change", (e) => {
+    appData.settings.showMainLine = e.target.checked;
+    buildHeader();
+    renderAllSegments();
+    scheduleProgressGuideRefresh();
+    triggerSave();
 });
 
 // ============================================
@@ -2437,6 +2525,7 @@ function setupControlEvents() {
             const newWidth = clampColumnWidth(resizeColIndex, resizeStartWidth + delta);
             leftColumnWidths[resizeColIndex] = newWidth;
             applyLeftColumnWidths();
+            scheduleProgressGuideRefresh();
         } else if (isResizingRow) {
             const task = taskObjects.find(t => t.id === resizeRowTaskId);
             if (!task) return;
@@ -2454,6 +2543,7 @@ function setupControlEvents() {
             resizeColIndex = null;
             document.body.style.cursor = "";
             document.body.style.userSelect = "";
+            scheduleProgressGuideRefresh();
             triggerSave();
         }
         if (isResizingRow) {
@@ -2470,13 +2560,15 @@ function setupControlEvents() {
 function handleMainCellClick(task, index) {
     if (isCtrlSelectionMode) return;
     const clickedIso = timelineDays[index].iso;
+    const clickedMain = findMainScheduleByDate(task, clickedIso);
 
-    if (activeProgressSegmentId === "__main__") {
-        if (!task.mainSchedule) {
+    if (activeProgressSegmentId) {
+        const targetMain = findMainScheduleById(task, activeProgressSegmentId);
+        if (!targetMain) {
             alert("この行にメインスケジュールがありません。");
             return;
         }
-        task.mainSchedule.progressEndDate = clickedIso;
+        targetMain.progressEndDate = clickedIso;
         activeProgressSegmentId = null;
         activeProgressTaskId = null;
         renderAllSegments();
@@ -2484,16 +2576,16 @@ function handleMainCellClick(task, index) {
         return;
     }
 
-    if (!task.mainSchedule) {
-        if (task.pendingMainStartIndex === null) {
-            task.pendingMainStartIndex = index;
-            task.pendingMainStartDate = clickedIso;
-            task.pendingStartIndex = null;
-            task.pendingStartDate = null;
-            renderAllSegments();
-            return;
-        }
+    if (task.pendingMainStartIndex === null && !clickedMain) {
+        task.pendingMainStartIndex = index;
+        task.pendingMainStartDate = clickedIso;
+        task.pendingStartIndex = null;
+        task.pendingStartDate = null;
+        renderAllSegments();
+        return;
+    }
 
+    if (task.pendingMainStartIndex !== null) {
         const startIso = task.pendingMainStartDate;
         const endIso = clickedIso;
         const s = startIso < endIso ? startIso : endIso;
@@ -2501,7 +2593,14 @@ function handleMainCellClick(task, index) {
         task.pendingMainStartIndex = null;
         task.pendingMainStartDate = null;
 
-        task.mainSchedule = {
+        if (hasOverlappingMainSchedule(task, s, e)) {
+            alert("メイン計画は重複して設定できません。既存のメイン計画の外側で設定してください。");
+            renderAllSegments();
+            return;
+        }
+
+        task.mainSchedules.push({
+            id: "main_" + Date.now() + "_" + Math.random().toString(36).slice(2),
             startDate: s,
             endDate: e,
             label: "メイン計画",
@@ -2509,15 +2608,16 @@ function handleMainCellClick(task, index) {
             endLabel: "",
             progressEndDate: null,
             milestones: []
-        };
+        });
+        task.mainSchedules.sort((a, b) => a.startDate.localeCompare(b.startDate));
         renderAllSegments();
         triggerSave();
         return;
     }
 
-    const main = task.mainSchedule;
-    if (clickedIso < main.startDate || clickedIso > main.endDate) {
-        alert("メインスケジュールの範囲内をクリックするとマイルストーンを追加できます。開始日・終了日は線のドラッグで調整できます。");
+    const main = clickedMain;
+    if (!main) {
+        alert("既存メイン計画の外側をクリックすると新しいメイン計画を追加できます。範囲内をクリックするとマイルストーンを追加できます。");
         return;
     }
 
